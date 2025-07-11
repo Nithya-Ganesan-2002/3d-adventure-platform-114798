@@ -1,71 +1,229 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
-import * as THREE from 'three';
+import React, { useEffect, useState, useCallback } from 'react';
+import { useAuth } from '../../context/AuthContext';
+import { api } from '../../api/client';
 
-// PUBLIC_INTERFACE
-export default function GameWorldPage() {
-  const mountRef = useRef<HTMLDivElement>(null);
+// Types
+type Player = {
+  id: string;
+  name: string;
+  position: { x: number; y: number; z: number };
+  inventory: string[];
+  progress: any;
+};
+
+type GameObject = {
+  id: string;
+  name: string;
+  position: { x: number; y: number; z: number };
+  interactable: boolean;
+};
+
+type GameState = {
+  player: Player | null;
+  objects: GameObject[];
+  loading: boolean;
+  error: string | null;
+};
+
+const GamePage = () => {
+  const { isAuthenticated } = useAuth();
+  const [user, setUser] = useState<{ username: string } | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [gameState, setGameState] = useState<GameState>({
+    player: null,
+    objects: [],
+    loading: true,
+    error: null,
+  });
+  const [info, setInfo] = useState<string>('');
+
+  // Example: get JWT from cookies for api headers if needed
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const jwt = document.cookie
+        .split('; ')
+        .find(row => row.startsWith('jwt='))
+        ?.split('=')[1];
+      setToken(jwt || null);
+
+      // Optionally get user info from backend
+      if (jwt) {
+        // Replace with user info endpoint if available
+        setUser({ username: 'Player' });
+      }
+    }
+  }, [isAuthenticated]);
+
+  // Fetch player state from backend
+  const fetchPlayerState = useCallback(async () => {
+    if (!token) return;
+    setGameState(prev => ({ ...prev, loading: true }));
+    try {
+      const res = await api.get('/game/state', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setGameState({
+        player: res.data.player,
+        objects: res.data.objects,
+        loading: false,
+        error: null,
+      });
+    } catch {
+      setGameState(prev => ({
+        ...prev,
+        loading: false,
+        error: 'Failed to load game state',
+      }));
+    }
+  }, [token]);
 
   useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return;
-    // Scene setup
-    const width = mount.clientWidth;
-    const height = mount.clientHeight;
+    if (token) fetchPlayerState();
+  }, [token, fetchPlayerState]);
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#88c0d0');
+  // Handler: Move player
+  const movePlayer = async (dx: number, dz: number) => {
+    if (!gameState.player || !token) return;
+    try {
+      const newPos = {
+        ...gameState.player.position,
+        x: gameState.player.position.x + dx,
+        z: gameState.player.position.z + dz,
+      };
+      await api.post(
+        '/game/move',
+        { position: newPos },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setGameState(prev =>
+        prev.player
+          ? {
+              ...prev,
+              player: { ...prev.player, position: newPos },
+              error: null,
+            }
+          : prev
+      );
+      setInfo('Player moved!');
+    } catch {
+      setGameState(prev => ({ ...prev, error: 'Failed to move player' }));
+      setInfo('');
+    }
+  };
 
-    const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-    camera.position.z = 5;
+  // Handler: Interact with object
+  const interactWithObject = async (objectId: string) => {
+    if (!token) return;
+    try {
+      const res = await api.post(
+        '/game/interact',
+        { object_id: objectId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setInfo(res.data.message || 'Interaction complete!');
+      fetchPlayerState();
+    } catch {
+      setGameState(prev => ({ ...prev, error: 'Interaction failed' }));
+      setInfo('');
+    }
+  };
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(width, height);
-    mount.appendChild(renderer.domElement);
+  // Handler: Pickup Item
+  const pickupItem = async (itemId: string) => {
+    if (!token) return;
+    try {
+      await api.post(
+        '/game/pickup',
+        { item_id: itemId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setInfo('Item picked up!');
+      fetchPlayerState();
+    } catch {
+      setGameState(prev => ({ ...prev, error: 'Could not pick up item' }));
+      setInfo('');
+    }
+  };
 
-    // Simple cube
-    const geometry = new THREE.BoxGeometry();
-    const material = new THREE.MeshStandardMaterial({ color: '#3B82F6' });
-    const cube = new THREE.Mesh(geometry, material);
-    scene.add(cube);
+  // Handler: Save progress
+  const saveProgress = async () => {
+    if (!token) return;
+    try {
+      await api.post(
+        '/game/save',
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setInfo('Progress saved!');
+    } catch {
+      setGameState(prev => ({
+        ...prev,
+        error: 'Could not save progress',
+      }));
+      setInfo('');
+    }
+  };
 
-    // Lighting
-    const light = new THREE.DirectionalLight(0xffffff, 1);
-    light.position.set(5, 10, 7);
-    scene.add(light);
+  if (!isAuthenticated) {
+    return (
+      <div className="flex flex-col items-center">
+        <h2>Please login to play</h2>
+      </div>
+    );
+  }
 
-    // Animation loop
-    let frameId: number;
-    const animate = () => {
-      cube.rotation.x += 0.01;
-      cube.rotation.y += 0.01;
-      renderer.render(scene, camera);
-      frameId = requestAnimationFrame(animate);
-    };
-    animate();
-
-    // Cleanup on component unmount
-    return () => {
-      cancelAnimationFrame(frameId);
-      renderer.dispose();
-      mount.removeChild(renderer.domElement);
-    };
-  }, []);
+  if (gameState.loading) {
+    return <div>Loading game...</div>;
+  }
 
   return (
-    <section style={{ width: '100%', height: '80vh', marginTop: '2rem' }}>
-      <h2 style={{ marginBottom: '1rem' }}>Game World</h2>
-      <div
-        ref={mountRef}
-        style={{
-          width: '100%',
-          height: '100%',
-          border: '2px solid #3B82F6',
-          borderRadius: '8px',
-          overflow: 'hidden',
-        }}
-      />
-    </section>
+    <div>
+      <h1>3D Adventure Game</h1>
+      <p>Welcome, {user ? user.username : ''}!</p>
+      <div>
+        <button onClick={() => movePlayer(1, 0)}>Move Right</button>
+        <button onClick={() => movePlayer(-1, 0)}>Move Left</button>
+        <button onClick={() => movePlayer(0, 1)}>Move Forward</button>
+        <button onClick={() => movePlayer(0, -1)}>Move Backward</button>
+        <button onClick={saveProgress}>Save Progress</button>
+      </div>
+      <div>
+        <h2>Inventory</h2>
+        <ul>
+          {gameState.player?.inventory.map((itemId) => (
+            <li key={itemId}>
+              {itemId}
+              <button onClick={() => pickupItem(itemId)}>
+                Pick Up
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <h2>Nearby Objects</h2>
+        <ul>
+          {gameState.objects.map((obj) => (
+            <li key={obj.id}>
+              {obj.name}
+              {obj.interactable && (
+                <button onClick={() => interactWithObject(obj.id)}>
+                  Interact
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <strong>Player Position:</strong> X: {gameState.player?.position.x} Y: {gameState.player?.position.y} Z: {gameState.player?.position.z}
+      </div>
+      {info && <div style={{ color: 'green' }}>{info}</div>}
+      {gameState.error && <div style={{ color: 'red' }}>{gameState.error}</div>}
+    </div>
   );
-}
+};
+
+export default GamePage;
